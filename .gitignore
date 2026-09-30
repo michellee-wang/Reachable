@@ -37,3 +37,8 @@ __screenshots__/
 
 # Vite
 *.timestamp-*-*.mjs
+
+# amplify
+.amplify
+amplify_outputs*
+amplifyconfiguration*
