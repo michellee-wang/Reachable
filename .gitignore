@@ -42,3 +42,6 @@ __screenshots__/
 .amplify
 amplify_outputs*
 amplifyconfiguration*
+
+# scanner container build artifact (produced by esbuild during the Docker build)
+amplify/functions/scanner/handler.js

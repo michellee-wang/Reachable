@@ -1,0 +1,15 @@
+{
+  "name": "scanner-lambda",
+  "private": true,
+  "type": "commonjs",
+  "scripts": {
+    "build": "esbuild handler.ts --bundle --platform=node --target=node20 --external:playwright --external:@axe-core/playwright --outfile=handler.js"
+  },
+  "dependencies": {
+    "@axe-core/playwright": "^4.11.0",
+    "playwright": "^1.55.0"
+  },
+  "devDependencies": {
+    "esbuild": "^0.28.2"
+  }
+}
