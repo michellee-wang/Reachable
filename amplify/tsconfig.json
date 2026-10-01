@@ -13,5 +13,8 @@
         "../.amplify/generated/*"
       ]
     }
-  }
+  },
+  "exclude": [
+    "functions/scanner"
+  ]
 }
