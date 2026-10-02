@@ -19,8 +19,17 @@ RUN npm install --no-save esbuild@^0.28.2 \
      --external:playwright --external:@axe-core/playwright --outfile=handler.js \
   && npm remove esbuild 2>/dev/null || true
 
-# Pull Chromium and its OS dependencies into the image.
-RUN npx playwright install --with-deps chromium
+# Chromium's shared-library dependencies. The base image is Amazon Linux 2023,
+# so Playwright's `--with-deps` (which shells out to apt-get) does not work;
+# install the libraries with dnf and run a plain `playwright install` instead.
+RUN dnf install -y \
+      nss nspr atk at-spi2-atk at-spi2-core cups-libs libdrm libxkbcommon \
+      libXcomposite libXdamage libXfixes libXrandr mesa-libgbm alsa-lib \
+      pango cairo \
+  && dnf clean all
+
+# Pull Chromium itself into the image (deps already installed above).
+RUN npx playwright install chromium
 
 # Lambda Node base uses the Runtime Interface Client; CMD is "<file>.<export>".
 CMD [ "handler.handler" ]
