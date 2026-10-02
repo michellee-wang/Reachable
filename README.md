@@ -40,4 +40,19 @@ npm run dev
 ```sh
 npm run build
 ```
+
+## Backend (deploy on demand)
+
+The backend is Amplify Gen 2 + CDK (`amplify/`). It is **not** left running — it
+is spun up on demand and torn down when idle to avoid ongoing cost:
+
+```sh
+npx ampx sandbox       # provision a personal cloud sandbox
+# ... demo / develop against it ...
+npx ampx sandbox delete # tear it down
+```
+
+`npx ampx sandbox` watches `amplify/` and writes `amplify_outputs.json`, which the
+Vue app reads at startup. The Chromium scanner is a container-image Lambda, so the
+first deploy builds a Docker image (pulls Chromium) and takes a few minutes.
 # Reachable
