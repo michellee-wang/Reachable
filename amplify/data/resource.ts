@@ -19,6 +19,8 @@ const schema = a.schema({
       domain: a.string().required(),
       rescanWeekly: a.boolean().default(false),
       scans: a.hasMany('Scan', 'siteId'),
+      // Ownership is fixed at creation — read/delete only, never reassignable.
+      owner: a.string().authorization((allow) => [allow.owner().to(['read', 'delete'])]),
     })
     .authorization((allow) => [allow.owner()]),
 
@@ -50,6 +52,7 @@ const schema = a.schema({
       finishedAt: a.datetime(),
       error: a.string(),
       pages: a.hasMany('Page', 'scanId'),
+      owner: a.string().authorization((allow) => [allow.owner().to(['read', 'delete'])]),
     })
     .authorization((allow) => [allow.owner()]),
 
@@ -63,6 +66,7 @@ const schema = a.schema({
       status: a.enum(['pending', 'scanning', 'done', 'failed']),
       screenshotKey: a.string(),
       violations: a.hasMany('Violation', 'pageId'),
+      owner: a.string().authorization((allow) => [allow.owner().to(['read', 'delete'])]),
     })
     .authorization((allow) => [allow.owner()]),
 
@@ -82,6 +86,7 @@ const schema = a.schema({
       html: a.string(),
       // Cached plain-English fix from Bedrock, keyed in practice by ruleId.
       plainEnglishFix: a.string(),
+      owner: a.string().authorization((allow) => [allow.owner().to(['read', 'delete'])]),
     })
     .authorization((allow) => [allow.owner()]),
 });
