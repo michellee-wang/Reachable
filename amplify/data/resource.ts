@@ -1,4 +1,5 @@
 import { type ClientSchema, a, defineData } from '@aws-amplify/backend';
+import { scanStatus } from '../functions/scan-status/resource';
 
 /**
  * Reachable's data model: sites, scans, pages, violations.
@@ -89,7 +90,12 @@ const schema = a.schema({
       owner: a.string().authorization((allow) => [allow.owner().to(['read', 'delete'])]),
     })
     .authorization((allow) => [allow.owner()]),
-});
+}).authorization((allow) => [
+  // The scan-status Lambda is the single writer of scan progress; it talks to
+  // this API with its IAM execution role (see its handler). Owner rules still
+  // scope every row to the nonprofit that started the scan.
+  allow.resource(scanStatus),
+]);
 
 export type Schema = ClientSchema<typeof schema>;
 
