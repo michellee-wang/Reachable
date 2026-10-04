@@ -79,7 +79,7 @@ const client: GraphQLClient = {
  * picks the action; the payload carries just what that action writes.
  */
 export type StatusEvent =
-  | { action: "createScan"; siteId: string }
+  | { action: "beginScan"; scanId: string }
   | { action: "setStatus"; scanId: string; status: string; error?: string }
   | { action: "registerPages"; scanId: string; urls: string[] }
   | {
@@ -92,15 +92,15 @@ export type StatusEvent =
 
 export const handler = async (event: StatusEvent) => {
   switch (event.action) {
-    case "createScan": {
-      const { id } = await client.createScan({ siteId: event.siteId });
-      // Stamp the start and flip into crawling in one update.
+    case "beginScan": {
+      // The Scan row already exists (start-scan created it). Flip it into
+      // crawling and stamp the start time.
       await client.updateScan({
-        id,
+        id: event.scanId,
         status: "crawling",
         startedAt: new Date().toISOString(),
       });
-      return { scanId: id };
+      return { scanId: event.scanId };
     }
 
     case "setStatus": {

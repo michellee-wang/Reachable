@@ -1,23 +1,27 @@
 import { defineBackend } from '@aws-amplify/backend';
 import { Duration } from 'aws-cdk-lib';
-import { DockerImageCode, DockerImageFunction } from 'aws-cdk-lib/aws-lambda';
+import { DockerImageCode, DockerImageFunction, Function as LambdaFunction } from 'aws-cdk-lib/aws-lambda';
 import * as sfn from 'aws-cdk-lib/aws-stepfunctions';
 import * as tasks from 'aws-cdk-lib/aws-stepfunctions-tasks';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { auth } from './auth/resource';
 import { data } from './data/resource';
 import { crawler } from './functions/crawler/resource';
 import { scanStatus } from './functions/scan-status/resource';
+import { startScan } from './functions/start-scan/resource';
 
 /**
+ * Reachable is a public, no-auth tool: no Cognito, no email. The data API is
+ * public (API key), scans are transient, and this backend is just the scan
+ * pipeline — crawler, scanner, scan-status, and the Step Functions workflow.
+ *
  * @see https://docs.amplify.aws/react/build-a-backend/ to add storage, functions, and more
  */
 const backend = defineBackend({
-  auth,
   data,
   crawler,
   scanStatus,
+  startScan,
 });
 
 // The Chromium scanner is a container image Lambda (Playwright + Chromium are
@@ -56,12 +60,14 @@ const retry: sfn.RetryProps = {
   backoffRate: 2,
 };
 
-// Create the Scan row and flip it into "crawling"; returns { scanId }.
-const createScan = new tasks.LambdaInvoke(workflowStack, 'CreateScan', {
+// The Scan row already exists (start-scan created it and seeded this execution
+// with its id). Flip it into "crawling" and stamp the start time. We carry the
+// id forward under $.scan.scanId so the rest of the workflow is unchanged.
+const beginScan = new tasks.LambdaInvoke(workflowStack, 'BeginScan', {
   lambdaFunction: statusFn,
   payload: sfn.TaskInput.fromObject({
-    action: 'createScan',
-    siteId: sfn.JsonPath.stringAt('$.siteId'),
+    action: 'beginScan',
+    scanId: sfn.JsonPath.stringAt('$.scanId'),
   }),
   resultSelector: { 'scanId.$': '$.Payload.scanId' },
   resultPath: '$.scan',
@@ -134,25 +140,15 @@ const scanAllPages = new sfn.Map(workflowStack, 'ScanAllPages', {
   resultPath: '$.scanned',
 }).itemProcessor(scanPage);
 
-// Summarize (Bedrock plain-English fixes) and email (SES) land in step 8; for
-// now the workflow advances the status so the progress bar reaches those phases
-// and the pipeline shape is real.
+// Summarize (Bedrock plain-English fixes) lands in step 8; for now the workflow
+// advances the status so the progress bar reaches that phase and the pipeline
+// shape is real. (Email was cut — this is a public, no-account tool.)
 const summarize = new tasks.LambdaInvoke(workflowStack, 'Summarize', {
   lambdaFunction: statusFn,
   payload: sfn.TaskInput.fromObject({
     action: 'setStatus',
     scanId: sfn.JsonPath.stringAt('$.scan.scanId'),
     status: 'summarizing',
-  }),
-  resultPath: sfn.JsonPath.DISCARD,
-}).addRetry(retry);
-
-const email = new tasks.LambdaInvoke(workflowStack, 'Email', {
-  lambdaFunction: statusFn,
-  payload: sfn.TaskInput.fromObject({
-    action: 'setStatus',
-    scanId: sfn.JsonPath.stringAt('$.scan.scanId'),
-    status: 'emailing',
   }),
   resultPath: sfn.JsonPath.DISCARD,
 }).addRetry(retry);
@@ -171,28 +167,29 @@ const finish = new tasks.LambdaInvoke(workflowStack, 'Finish', {
 
 // If any step exhausts its retries, flip the Scan to "failed" with the error so
 // the browser stops waiting, then end in a Fail state.
+// Reads the id from the raw execution input ($.scanId), not $.scan.scanId, so
+// it still works if beginScan is the step that failed (before $.scan is set).
 const markFailed = new tasks.LambdaInvoke(workflowStack, 'MarkFailed', {
   lambdaFunction: statusFn,
   payload: sfn.TaskInput.fromObject({
     action: 'setStatus',
-    scanId: sfn.JsonPath.stringAt('$.scan.scanId'),
+    scanId: sfn.JsonPath.stringAt('$.scanId'),
     status: 'failed',
     error: sfn.JsonPath.stringAt('$.error.Cause'),
   }),
 }).next(new sfn.Fail(workflowStack, 'ScanFailed', { error: 'ScanFailed' }));
 
-const definition = createScan
+const definition = beginScan
   .next(crawl)
   .next(registerPages)
   .next(scanAllPages)
   .next(summarize)
-  .next(email)
   .next(finish)
   .next(new sfn.Succeed(workflowStack, 'ScanComplete'));
 
-// Attach the failure path to every step that can throw. createScan runs before
-// a Scan row exists, so it can't mark one failed — it just surfaces the error.
-for (const step of [crawl, registerPages, scanAllPages, summarize, email, finish]) {
+// Attach the failure path to every step that can throw. The Scan row already
+// exists (start-scan created it), so even a beginScan failure can be marked.
+for (const step of [beginScan, crawl, registerPages, scanAllPages, summarize, finish]) {
   step.addCatch(markFailed, { resultPath: '$.error' });
 }
 
@@ -207,7 +204,14 @@ const stateMachine = new sfn.StateMachine(workflowStack, 'ScanWorkflow', {
 // raw CDK scanner function needs an explicit grant).
 scannerFunction.grantInvoke(stateMachine);
 
-// Surface the ARN so the UI's start-scan mutation (step 7) can kick off a run.
-backend.addOutput({
-  custom: { scanWorkflowArn: stateMachine.stateMachineArn },
-});
+// The startScan mutation's Lambda is what kicks off a run: give it the ARN and
+// permission to start an execution.
+const startScanFn = backend.startScan.resources.lambda as LambdaFunction;
+startScanFn.addEnvironment('SCAN_WORKFLOW_ARN', stateMachine.stateMachineArn);
+stateMachine.grantStartExecution(startScanFn);
+
+// Transience: a 1-hour TTL on the Scan table. DynamoDB auto-deletes expired
+// rows, so nothing is durably stored and the capability-URL exposure window is
+// bounded. (Reads treat an expired scan as gone even before AWS sweeps it.)
+const scanTable = backend.data.resources.cfnResources.amplifyDynamoDbTables['Scan'];
+scanTable.timeToLiveAttribute = { attributeName: 'ttl', enabled: true };
