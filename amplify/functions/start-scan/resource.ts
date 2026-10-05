@@ -14,4 +14,10 @@ export const startScan = defineFunction({
   entry: "./handler.ts",
   timeoutSeconds: 30,
   memoryMB: 256,
+  // Declared here so it's present in the generated env type; the real ARN is
+  // only known once the state machine is built, so backend.ts overrides the
+  // value with addEnvironment.
+  environment: {
+    SCAN_WORKFLOW_ARN: "",
+  },
 });

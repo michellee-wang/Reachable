@@ -7,6 +7,8 @@
  * that is the whole point of this Lambda (see CLAUDE.md).
  */
 
+import { explainRules, mapPool, type Explainer } from "./fixes";
+
 /** One axe-core violation on a page, as returned by the scanner. */
 export interface ViolationInput {
   ruleId: string;
@@ -23,6 +25,8 @@ export interface PageResultInput {
   pageId: string;
   status: "done" | "failed";
   violations: ViolationInput[];
+  /** S3 key of the page screenshot, when the scanner managed to store one. */
+  screenshotKey?: string;
 }
 
 /**
@@ -33,6 +37,7 @@ export interface PageResultInput {
 export interface ScannerPageResult {
   pageId: string;
   status: "done" | "failed";
+  screenshotKey?: string;
   violations: {
     id: string;
     impact: string | null;
@@ -73,7 +78,12 @@ export function flattenScanResult(scan: ScannerPageResult): PageResultInput {
       }
     }
   }
-  return { pageId: scan.pageId, status: scan.status, violations };
+  return {
+    pageId: scan.pageId,
+    status: scan.status,
+    violations,
+    ...(scan.screenshotKey ? { screenshotKey: scan.screenshotKey } : {}),
+  };
 }
 
 /**
@@ -96,8 +106,19 @@ export interface GraphQLClient {
     finishedAt?: string;
     error?: string;
   }): Promise<void>;
-  updatePage(input: { id: string; status: string }): Promise<void>;
+  updatePage(input: { id: string; status: string; screenshotKey?: string }): Promise<void>;
   createViolation(input: ViolationInput & { pageId: string }): Promise<void>;
+  listPages(scanId: string): Promise<{ id: string }[]>;
+  listViolations(pageId: string): Promise<ViolationRow[]>;
+  updateViolation(input: { id: string; plainEnglishFix: string }): Promise<void>;
+}
+
+/** A stored violation row, just the fields the summarizer needs. */
+export interface ViolationRow {
+  id: string;
+  ruleId: string;
+  help?: string | null;
+  description?: string | null;
 }
 
 /**
@@ -169,14 +190,17 @@ export async function recordPageResult(
   _scanId: string,
   result: PageResultInput,
 ): Promise<ImpactTally> {
-  await client.updatePage({ id: result.pageId, status: result.status });
+  await client.updatePage({
+    id: result.pageId,
+    status: result.status,
+    ...(result.screenshotKey ? { screenshotKey: result.screenshotKey } : {}),
+  });
   for (const v of result.violations) {
     await client.createViolation({ ...v, pageId: result.pageId });
   }
   return tallyImpacts(result.violations);
 }
 
-/** Sum the per-page tallies the Map collected into the Scan's rolled-up totals. */
 export function sumTallies(tallies: ImpactTally[]): ImpactTally & { pagesScanned: number } {
   const total = { pagesScanned: tallies.length, criticalCount: 0, seriousCount: 0, moderateCount: 0, minorCount: 0 };
   for (const t of tallies) {
@@ -205,4 +229,33 @@ export async function finalizeScan(
     finishedAt,
     ...sumTallies(tallies),
   });
+}
+
+/**
+ * Write a plain-English fix onto every violation in the scan. Each axe rule is
+ * explained once (see explainRules) and that text is copied onto every row
+ * with the same ruleId. Runs after the Map, so it is a single writer and does
+ * not race with recordPageResult.
+ */
+export async function applyPlainEnglishFixes(
+  client: GraphQLClient,
+  explainer: Explainer,
+  scanId: string,
+): Promise<{ ruleCount: number; explained: number }> {
+  const pages = await client.listPages(scanId);
+  const violations: ViolationRow[] = [];
+  await mapPool(pages, 8, async (page) => {
+    violations.push(...(await client.listViolations(page.id)));
+  });
+
+  const fixes = await explainRules(explainer, violations);
+  for (const violation of violations) {
+    const fix = fixes.get(violation.ruleId);
+    if (fix) await client.updateViolation({ id: violation.id, plainEnglishFix: fix });
+  }
+
+  return {
+    ruleCount: new Set(violations.map((v) => v.ruleId)).size,
+    explained: fixes.size,
+  };
 }

@@ -7,11 +7,14 @@ import {
   GraphQLClient,
   ImpactTally,
   ScannerPageResult,
+  ViolationRow,
+  applyPlainEnglishFixes,
   finalizeScan,
   flattenScanResult,
   recordPageResult,
   registerPages,
 } from "./actions";
+import { bedrockClient, createBedrockExplainer } from "./bedrock";
 
 /**
  * The scan-status Lambda. The testable write logic lives in actions.ts behind a
@@ -72,7 +75,56 @@ const client: GraphQLClient = {
     const { errors } = await data.models.Violation.create(input);
     if (errors) throw new Error(`createViolation: ${JSON.stringify(errors)}`);
   },
+  async listPages(scanId) {
+    return listAll(`listPages ${scanId}`, (nextToken) =>
+      data.models.Page.list({ filter: { scanId: { eq: scanId } }, nextToken }),
+    ).then((pages) => pages.map((page) => ({ id: page.id })));
+  },
+  async listViolations(pageId) {
+    return listAll(`listViolations ${pageId}`, (nextToken) =>
+      data.models.Violation.list({ filter: { pageId: { eq: pageId } }, nextToken }),
+    ).then((rows) =>
+      rows.map(
+        (row): ViolationRow => ({
+          id: row.id,
+          ruleId: row.ruleId,
+          help: row.help,
+          description: row.description,
+        }),
+      ),
+    );
+  },
+  async updateViolation(input) {
+    const { errors } = await data.models.Violation.update(input);
+    if (errors) throw new Error(`updateViolation: ${JSON.stringify(errors)}`);
+  },
 };
+
+/**
+ * Follow an Amplify list's nextToken until the model is exhausted. A scan is
+ * capped around 200 pages, so this stays small, but a single page can still
+ * return a partial page of violations.
+ */
+async function listAll<T extends { id: string }>(
+  label: string,
+  fetch: (nextToken?: string) => Promise<{
+    data: T[];
+    errors?: { message: string }[] | null;
+    nextToken?: string | null;
+  }>,
+): Promise<T[]> {
+  const out: T[] = [];
+  let nextToken: string | undefined;
+  do {
+    const page = await fetch(nextToken);
+    if (page.errors?.length) throw new Error(`${label}: ${JSON.stringify(page.errors)}`);
+    out.push(...page.data);
+    nextToken = page.nextToken ?? undefined;
+  } while (nextToken);
+  return out;
+}
+
+const explainer = createBedrockExplainer(bedrockClient(), env.BEDROCK_MODEL_ID);
 
 /**
  * One event per workflow stage, discriminated by `action`. The state machine
@@ -88,7 +140,8 @@ export type StatusEvent =
       // The scanner's raw axe-shaped payload; flattened to rows here.
       result: ScannerPageResult;
     }
-  | { action: "finish"; scanId: string; tallies: ImpactTally[]; finishedAt: string };
+  | { action: "finish"; scanId: string; tallies: ImpactTally[]; finishedAt: string }
+  | { action: "summarize"; scanId: string };
 
 export const handler = async (event: StatusEvent) => {
   switch (event.action) {
@@ -114,7 +167,6 @@ export const handler = async (event: StatusEvent) => {
 
     case "registerPages": {
       const pages = await registerPages(client, event.scanId, event.urls);
-      // Hand the Map its work-list.
       return { pages };
     }
 
@@ -132,6 +184,15 @@ export const handler = async (event: StatusEvent) => {
     case "finish": {
       await finalizeScan(client, event.scanId, event.tallies, event.finishedAt);
       return { scanId: event.scanId };
+    }
+
+    case "summarize": {
+      // Flip the status first so the browser can show "writing fixes" while
+      // the model calls run. A rule that Bedrock can't explain is left blank;
+      // the UI falls back to axe's description.
+      await client.updateScan({ id: event.scanId, status: "summarizing" });
+      const summary = await applyPlainEnglishFixes(client, explainer, event.scanId);
+      return { scanId: event.scanId, ...summary };
     }
   }
 };

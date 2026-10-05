@@ -15,15 +15,31 @@ const url = ref('')
 const phase = ref<Phase>('idle')
 const scan = ref<Scan | null>(null)
 const errorMsg = ref('')
+const pagesDone = ref(0)
 
 let sub: { unsubscribe: () => void } | null = null
+let pageSub: { unsubscribe: () => void } | null = null
+const seenDone = new Set<string>()
 
 function reset() {
   sub?.unsubscribe()
+  pageSub?.unsubscribe()
   sub = null
+  pageSub = null
+  seenDone.clear()
+  pagesDone.value = 0
   scan.value = null
   errorMsg.value = ''
   phase.value = 'idle'
+}
+
+/** The Scan counters are written once at the end, so live progress comes from
+ *  each Page flipping to done or failed. */
+function noteDone(page: { id: string; status?: string | null }) {
+  if (page.status !== 'done' && page.status !== 'failed') return
+  if (seenDone.has(page.id)) return
+  seenDone.add(page.id)
+  pagesDone.value = seenDone.size
 }
 
 async function start() {
@@ -42,14 +58,24 @@ async function start() {
   }
 }
 
+/** Catch pages that finished before the subscription was listening. */
+async function syncDone(scanId: string) {
+  const { data } = await client.models.Scan.get({ id: scanId })
+  if (!data) return
+  const { data: pageRows } = await data.pages()
+  for (const page of pageRows ?? []) noteDone(page)
+}
+
 /** Subscribe to the one scan we just started and mirror its live state. */
 function watchScan(scanId: string) {
   phase.value = 'running'
   sub = client.models.Scan.onUpdate({ filter: { id: { eq: scanId } } }).subscribe({
     next: (updated) => {
       scan.value = updated
-      if (updated.status === 'done') phase.value = 'done'
-      else if (updated.status === 'failed') {
+      if (updated.status === 'done') {
+        phase.value = 'done'
+        void syncDone(scanId)
+      } else if (updated.status === 'failed') {
         phase.value = 'failed'
         errorMsg.value = updated.error ?? 'The scan failed.'
       }
@@ -59,13 +85,20 @@ function watchScan(scanId: string) {
       errorMsg.value = err instanceof Error ? err.message : 'Lost connection to the scan.'
     },
   })
+  pageSub = client.models.Page.onUpdate({ filter: { scanId: { eq: scanId } } }).subscribe({
+    next: (page) => noteDone(page),
+  })
   // Prime the view immediately (the first onUpdate may be a moment away).
   void client.models.Scan.get({ id: scanId }).then(({ data }) => {
     if (data && !scan.value) scan.value = data
   })
+  void syncDone(scanId)
 }
 
-onUnmounted(() => sub?.unsubscribe())
+onUnmounted(() => {
+  sub?.unsubscribe()
+  pageSub?.unsubscribe()
+})
 
 function print() {
   window.print()
@@ -80,9 +113,9 @@ const total = computed(() => {
 })
 
 const progressPct = computed(() => {
-  const s = scan.value
-  if (!s?.pagesDiscovered) return 0
-  return Math.round(((s.pagesScanned ?? 0) / s.pagesDiscovered) * 100)
+  const discovered = scan.value?.pagesDiscovered ?? 0
+  if (!discovered) return 0
+  return Math.min(100, Math.round((pagesDone.value / discovered) * 100))
 })
 
 const statusLabel = computed(() => {
@@ -149,7 +182,7 @@ function impactCount(impact: Impact): number {
         <div class="fill" :style="{ width: progressPct + '%' }" />
       </div>
       <p class="counts">
-        {{ scan?.pagesScanned ?? 0 }} / {{ scan?.pagesDiscovered ?? 0 }} pages scanned
+        {{ pagesDone }} / {{ scan?.pagesDiscovered ?? 0 }} pages scanned
       </p>
     </section>
 

@@ -1,5 +1,6 @@
 import { type ClientSchema, a, defineData } from '@aws-amplify/backend';
 import { scanStatus } from '../functions/scan-status/resource';
+import { screenshotUrl } from '../functions/screenshot-url/resource';
 import { startScan } from '../functions/start-scan/resource';
 
 /**
@@ -8,18 +9,11 @@ import { startScan } from '../functions/start-scan/resource';
  * This is a public, no-auth tool. There are no accounts. Access is via a public
  * API key baked into the app, not Cognito.
  *
- * Security model — capability URLs, not enumeration:
- *   - The public key can only READ BY ID (get/listen). It deliberately has NO
- *     `list` and NO write. So knowing a scanId lets you read that one scan; you
- *     cannot enumerate other people's scans. (A public API key authorizes at the
- *     operation level, not the row level, so withholding `list` is what keeps the
- *     capability model sound — see the security note in DESIGN.md.)
- *   - Scans are started through the `startScan` mutation (a Lambda), never by a
- *     public create. That Lambda is the only public write path, and it just
- *     returns the new scanId.
- *   - The scan-status Lambda writes progress with its IAM role.
- *   - The root Scan record is transient: a 1-hour TTL (see backend.ts) shrinks
- *     the exposure window and keeps storage tiny.
+ * The public key can only get/listen, never list or write, so a scanId is a
+ * capability: you can read the one scan you hold the id for, but you can't
+ * enumerate others. (API-key auth is per-operation, not per-row, so dropping
+ * list is what keeps that true.) Writes go through startScan (public) and the
+ * scan-status Lambda (IAM). Scans carry a 1-hour TTL, set in backend.ts.
  */
 
 const schema = a.schema({
@@ -54,10 +48,8 @@ const schema = a.schema({
         'done',
         'failed',
       ]),
-      // Progress: pages discovered by the crawler vs. pages scanned so far.
       pagesDiscovered: a.integer().default(0),
       pagesScanned: a.integer().default(0),
-      // Rolled-up violation counts for the report header.
       criticalCount: a.integer().default(0),
       seriousCount: a.integer().default(0),
       moderateCount: a.integer().default(0),
@@ -65,17 +57,13 @@ const schema = a.schema({
       startedAt: a.datetime(),
       finishedAt: a.datetime(),
       error: a.string(),
-      // DynamoDB TTL: epoch seconds after which this scan auto-deletes. Set by
-      // start-scan to ~1 hour out (TTL config is in backend.ts).
+      // epoch seconds; set ~1h out by start-scan, swept by DynamoDB TTL (backend.ts)
       ttl: a.integer(),
       pages: a.hasMany('Page', 'scanId'),
     })
-    // Read-by-id + subscribe only: the browser watches one scan it already
-    // holds the id for. No list (no enumeration) and no public write.
     .authorization((allow) => [allow.publicApiKey().to(['get', 'listen'])]),
 
-  // One URL within a Scan. Holds its own scan status and the S3 key of its
-  // screenshot (the bucket comes in step 8 with storage).
+  // One URL within a Scan, with its scan status and the S3 key of its screenshot.
   Page: a
     .model({
       scanId: a.id().required(),
@@ -87,8 +75,8 @@ const schema = a.schema({
     })
     .authorization((allow) => [allow.publicApiKey().to(['get', 'listen'])]),
 
-  // One axe-core rule failure on a Page. Carries the element that failed and
-  // the cached Bedrock plain-English fix (one explanation per rule, step 8).
+  // One axe-core rule failure on a Page: the element that failed plus the
+  // cached plain-English fix (one per rule).
   Violation: a
     .model({
       pageId: a.id().required(),
@@ -98,10 +86,9 @@ const schema = a.schema({
       description: a.string(),
       help: a.string(),
       helpUrl: a.string(),
-      // The offending element: CSS target and its HTML snippet.
+      // offending element: CSS selector + the HTML snippet
       target: a.string(),
       html: a.string(),
-      // Cached plain-English fix from Bedrock, keyed in practice by ruleId.
       plainEnglishFix: a.string(),
     })
     .authorization((allow) => [allow.publicApiKey().to(['get', 'listen'])]),
@@ -116,10 +103,23 @@ const schema = a.schema({
     .returns(a.ref('StartScanResult'))
     .handler(a.handler.function(startScan))
     .authorization((allow) => [allow.publicApiKey()]),
+
+  // Presign one screenshot. The key is `{scanId}/{pageId}.png`; the Lambda
+  // rejects anything else, and the bucket itself stays private.
+  screenshotUrl: a
+    .query()
+    .arguments({ key: a.string().required() })
+    .returns(a.string().required())
+    .handler(a.handler.function(screenshotUrl))
+    .authorization((allow) => [allow.publicApiKey()]),
 }).authorization((allow) => [
   // The scan-status Lambda is the single writer of scan progress; it talks to
   // this API with its IAM execution role (see its handler).
   allow.resource(scanStatus),
+  // start-scan creates the Site + Scan rows (it's the startScan handler, but it
+  // also calls the data API with generateClient, so it needs the data env +
+  // grant like scan-status does).
+  allow.resource(startScan),
 ]);
 
 export type Schema = ClientSchema<typeof schema>;

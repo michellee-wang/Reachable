@@ -1,13 +1,20 @@
 import { defineBackend } from '@aws-amplify/backend';
-import { Duration } from 'aws-cdk-lib';
+import { Duration, RemovalPolicy, Stack } from 'aws-cdk-lib';
+import * as iam from 'aws-cdk-lib/aws-iam';
 import { DockerImageCode, DockerImageFunction, Function as LambdaFunction } from 'aws-cdk-lib/aws-lambda';
+import * as s3 from 'aws-cdk-lib/aws-s3';
 import * as sfn from 'aws-cdk-lib/aws-stepfunctions';
 import * as tasks from 'aws-cdk-lib/aws-stepfunctions-tasks';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { data } from './data/resource';
 import { crawler } from './functions/crawler/resource';
-import { scanStatus } from './functions/scan-status/resource';
+import {
+  BEDROCK_FOUNDATION_MODEL_ID,
+  BEDROCK_MODEL_ID,
+  scanStatus,
+} from './functions/scan-status/resource';
+import { screenshotUrl } from './functions/screenshot-url/resource';
 import { startScan } from './functions/start-scan/resource';
 
 /**
@@ -22,6 +29,7 @@ const backend = defineBackend({
   crawler,
   scanStatus,
   startScan,
+  screenshotUrl,
 });
 
 // The Chromium scanner is a container image Lambda (Playwright + Chromium are
@@ -34,8 +42,30 @@ const scannerStack = backend.createStack('scanner');
 const scannerFunction = new DockerImageFunction(scannerStack, 'ScannerFunction', {
   code: DockerImageCode.fromImageAsset(path.join(here, 'functions', 'scanner')),
   memorySize: 2048, // Chromium needs headroom
-  timeout: Duration.seconds(60),
+  timeout: Duration.seconds(90),
 });
+
+// Screenshots are private and short-lived. The browser never talks to the
+// bucket directly; screenshot-url presigns a GET. Objects expire after a day
+// (scans themselves TTL out after an hour). No versioning: these are not
+// records we need to recover, and versioning would leave delete markers behind
+// when the sandbox is torn down.
+const screenshots = new s3.Bucket(scannerStack, 'Screenshots', {
+  blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
+  encryption: s3.BucketEncryption.S3_MANAGED,
+  enforceSSL: true,
+  objectOwnership: s3.ObjectOwnership.BUCKET_OWNER_ENFORCED,
+  removalPolicy: RemovalPolicy.DESTROY,
+  autoDeleteObjects: true,
+  lifecycleRules: [
+    {
+      expiration: Duration.days(1),
+      abortIncompleteMultipartUploadAfter: Duration.days(1),
+    },
+  ],
+});
+screenshots.grantPut(scannerFunction);
+scannerFunction.addEnvironment('SCREENSHOT_BUCKET', screenshots.bucketName);
 
 // -----------------------------------------------------------------------------
 // Step Functions workflow (build step 6)
@@ -102,6 +132,7 @@ const scanPage = new tasks.LambdaInvoke(workflowStack, 'ScanPage', {
   payload: sfn.TaskInput.fromObject({
     pageId: sfn.JsonPath.stringAt('$.pageId'),
     url: sfn.JsonPath.stringAt('$.url'),
+    scanId: sfn.JsonPath.stringAt('$.scanId'),
   }),
   resultSelector: { 'result.$': '$.Payload' },
   resultPath: '$.scan',
@@ -140,15 +171,14 @@ const scanAllPages = new sfn.Map(workflowStack, 'ScanAllPages', {
   resultPath: '$.scanned',
 }).itemProcessor(scanPage);
 
-// Summarize (Bedrock plain-English fixes) lands in step 8; for now the workflow
-// advances the status so the progress bar reaches that phase and the pipeline
-// shape is real. (Email was cut — this is a public, no-account tool.)
+// One plain-English fix per axe rule, written onto the violation rows. The
+// status flip to "summarizing" happens inside the action so the browser can
+// show it while the model calls run. (Email was cut — this is a public tool.)
 const summarize = new tasks.LambdaInvoke(workflowStack, 'Summarize', {
   lambdaFunction: statusFn,
   payload: sfn.TaskInput.fromObject({
-    action: 'setStatus',
+    action: 'summarize',
     scanId: sfn.JsonPath.stringAt('$.scan.scanId'),
-    status: 'summarizing',
   }),
   resultPath: sfn.JsonPath.DISCARD,
 }).addRetry(retry);
@@ -215,3 +245,26 @@ stateMachine.grantStartExecution(startScanFn);
 // bounded. (Reads treat an expired scan as gone even before AWS sweeps it.)
 const scanTable = backend.data.resources.cfnResources.amplifyDynamoDbTables['Scan'];
 scanTable.timeToLiveAttribute = { attributeName: 'ttl', enabled: true };
+
+// Bedrock: invoke only this one model. The profile ARN is account-scoped; the
+// foundation-model ARN uses a region wildcard because the us. profile may
+// route the call to another US region.
+const statusStack = Stack.of(statusFn);
+statusFn.addToRolePolicy(
+  new iam.PolicyStatement({
+    actions: ['bedrock:InvokeModel', 'bedrock:Converse'],
+    resources: [
+      `arn:aws:bedrock:*::foundation-model/${BEDROCK_FOUNDATION_MODEL_ID}`,
+      statusStack.formatArn({
+        service: 'bedrock',
+        resource: 'inference-profile',
+        resourceName: BEDROCK_MODEL_ID,
+      }),
+    ],
+  }),
+);
+
+const screenshotFn = backend.screenshotUrl.resources.lambda as LambdaFunction;
+screenshotFn.addEnvironment('SCREENSHOT_BUCKET', screenshots.bucketName);
+screenshots.grantRead(screenshotFn);
+

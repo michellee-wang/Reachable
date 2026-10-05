@@ -39,7 +39,17 @@ function byImpact(a: ScanViolation, b: ScanViolation): number {
   return (ai === -1 ? IMPACT_ORDER.length : ai) - (bi === -1 ? IMPACT_ORDER.length : bi);
 }
 
-export async function scan(url: string): Promise<ScanResult> {
+export interface ScanOutput {
+  result: ScanResult;
+  /**
+   * Viewport PNG. A full-page capture of a long page is large enough to blow
+   * the Lambda's memory, and the image never rides the Step Functions payload
+   * (the handler uploads this buffer and returns only the object key).
+   */
+  screenshot: Buffer;
+}
+
+export async function scan(url: string): Promise<ScanOutput> {
   if (!/^https?:\/\//.test(url)) {
     throw new Error(`scan requires an http(s) URL, got: ${url}`);
   }
@@ -51,7 +61,7 @@ export async function scan(url: string): Promise<ScanResult> {
   });
 
   try {
-    const context = await browser.newContext();
+    const context = await browser.newContext({ viewport: { width: 1280, height: 800 } });
     const page = await context.newPage();
     await page.goto(url, { waitUntil: "domcontentloaded", timeout: 30_000 });
 
@@ -75,10 +85,15 @@ export async function scan(url: string): Promise<ScanResult> {
 
     violations.sort(byImpact);
 
+    const screenshot = await page.screenshot({ type: "png" });
+
     return {
-      url,
-      scannedAt: new Date().toISOString(),
-      violations,
+      result: {
+        url,
+        scannedAt: new Date().toISOString(),
+        violations,
+      },
+      screenshot,
     };
   } finally {
     await browser.close();

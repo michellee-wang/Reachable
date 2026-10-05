@@ -17,6 +17,7 @@ interface PageReport {
 
 const loading = ref(true)
 const pages = ref<PageReport[]>([])
+const shots = ref<Record<string, string>>({})
 
 /** Rank order so critical issues sort first within a page. */
 function byImpact(a: Violation, b: Violation): number {
@@ -41,6 +42,14 @@ onMounted(async () => {
     // Pages with the most issues first; clean pages last.
     reports.sort((a, b) => b.violations.length - a.violations.length)
     pages.value = reports
+    await Promise.all(
+      reports.map(async ({ page }) => {
+        const key = page.screenshotKey
+        if (!key) return
+        const { data } = await client.queries.screenshotUrl({ key })
+        if (data) shots.value = { ...shots.value, [key]: data }
+      }),
+    )
   } finally {
     loading.value = false
   }
@@ -56,6 +65,13 @@ onMounted(async () => {
         <a :href="page.url" target="_blank" rel="noopener">{{ page.url }}</a>
       </h3>
 
+      <img
+        v-if="page.screenshotKey && shots[page.screenshotKey]"
+        class="shot"
+        :src="shots[page.screenshotKey]"
+        :alt="'Screenshot of ' + page.url"
+      />
+
       <p v-if="page.status === 'failed'" class="page-failed">
         This page couldn't be scanned.
       </p>
@@ -69,7 +85,8 @@ onMounted(async () => {
           </div>
           <p v-if="v.plainEnglishFix" class="fix">{{ v.plainEnglishFix }}</p>
           <p v-else-if="v.description" class="desc">{{ v.description }}</p>
-          <code v-if="v.target" class="target">{{ v.target }}</code>
+          <code v-if="v.html" class="target">{{ v.html }}</code>
+          <code v-else-if="v.target" class="target">{{ v.target }}</code>
           <a
             v-if="v.helpUrl"
             class="learn no-print"
@@ -99,6 +116,13 @@ onMounted(async () => {
 }
 .page h3 a {
   color: #1a56db;
+}
+.shot {
+  display: block;
+  max-width: 100%;
+  margin: 0.25rem 0 0.75rem;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
 }
 .page-clean {
   color: #046c4e;

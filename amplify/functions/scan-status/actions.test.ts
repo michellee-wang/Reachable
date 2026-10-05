@@ -4,6 +4,8 @@ import {
   PageResultInput,
   ScannerPageResult,
   ViolationInput,
+  ViolationRow,
+  applyPlainEnglishFixes,
   finalizeScan,
   flattenScanResult,
   recordPageResult,
@@ -19,6 +21,8 @@ import {
  */
 class FakeClient implements GraphQLClient {
   calls: { op: string; input: unknown }[] = [];
+  pages: { id: string }[] = [];
+  violations: Record<string, ViolationRow[]> = {};
   private seq = 0;
 
   async createScan(input: { siteId: string }) {
@@ -32,11 +36,20 @@ class FakeClient implements GraphQLClient {
   async updateScan(input: Record<string, unknown>) {
     this.calls.push({ op: "updateScan", input });
   }
-  async updatePage(input: { id: string; status: string }) {
+  async updatePage(input: { id: string; status: string; screenshotKey?: string }) {
     this.calls.push({ op: "updatePage", input });
   }
   async createViolation(input: ViolationInput & { pageId: string }) {
     this.calls.push({ op: "createViolation", input });
+  }
+  async listPages() {
+    return this.pages;
+  }
+  async listViolations(pageId: string) {
+    return this.violations[pageId] ?? [];
+  }
+  async updateViolation(input: { id: string; plainEnglishFix: string }) {
+    this.calls.push({ op: "updateViolation", input });
   }
 
   opsOf(op: string) {
@@ -142,6 +155,21 @@ describe("recordPageResult", () => {
     expect(client.opsOf("updatePage")[0]).toEqual({ id: "p1", status: "failed" });
     expect(client.opsOf("createViolation")).toHaveLength(0);
     expect(tally).toEqual({ criticalCount: 0, seriousCount: 0, moderateCount: 0, minorCount: 0 });
+  });
+
+  it("stores the screenshot key when the scanner uploaded one", async () => {
+    const client = new FakeClient();
+    await recordPageResult(client, "scan-1", {
+      pageId: "page-1",
+      status: "done",
+      screenshotKey: "scan-1/page-1.png",
+      violations: [],
+    });
+    expect(client.opsOf("updatePage")[0]).toEqual({
+      id: "page-1",
+      status: "done",
+      screenshotKey: "scan-1/page-1.png",
+    });
   });
 });
 
@@ -254,5 +282,67 @@ describe("flattenScanResult", () => {
   it("carries a failed page through with no violations", () => {
     const flat = flattenScanResult({ pageId: "p9", status: "failed", violations: [] });
     expect(flat).toEqual({ pageId: "p9", status: "failed", violations: [] });
+  });
+
+  it("keeps the screenshot key on the flattened result", () => {
+    const flat = flattenScanResult({
+      pageId: "p1",
+      status: "done",
+      screenshotKey: "scan/page.png",
+      violations: [],
+    });
+    expect(flat.screenshotKey).toBe("scan/page.png");
+  });
+});
+
+describe("applyPlainEnglishFixes", () => {
+  it("writes one explanation per rule onto every matching violation", async () => {
+    const client = new FakeClient();
+    client.pages = [{ id: "page-1" }, { id: "page-2" }];
+    client.violations = {
+      "page-1": [
+        { id: "v1", ruleId: "image-alt", help: "add alt" },
+        { id: "v2", ruleId: "button-name", help: "name it" },
+      ],
+      "page-2": [{ id: "v3", ruleId: "image-alt", help: "add alt" }],
+    };
+    const seen: string[] = [];
+
+    const summary = await applyPlainEnglishFixes(
+      client,
+      {
+        async explain(rule) {
+          seen.push(rule.ruleId);
+          return `Fix ${rule.ruleId}.`;
+        },
+      },
+      "scan-1",
+    );
+
+    expect(seen.sort()).toEqual(["button-name", "image-alt"]);
+    expect(summary).toEqual({ ruleCount: 2, explained: 2 });
+    const writes = client.opsOf("updateViolation") as { id: string; plainEnglishFix: string }[];
+    expect(writes).toHaveLength(3);
+    expect(writes.find((w) => w.id === "v1")?.plainEnglishFix).toBe("Fix image-alt.");
+    expect(writes.find((w) => w.id === "v3")?.plainEnglishFix).toBe("Fix image-alt.");
+  });
+
+  it("leaves a row alone when its rule could not be explained", async () => {
+    const client = new FakeClient();
+    client.pages = [{ id: "page-1" }];
+    client.violations = { "page-1": [{ id: "v1", ruleId: "color-contrast" }] };
+
+    const summary = await applyPlainEnglishFixes(
+      client,
+      {
+        async explain() {
+          throw new Error("unavailable");
+        },
+      },
+      "scan-1",
+    );
+
+    expect(summary).toEqual({ ruleCount: 1, explained: 0 });
+    expect(client.opsOf("updateViolation")).toHaveLength(0);
   });
 });
