@@ -3,6 +3,7 @@ import { Duration, RemovalPolicy, Stack } from 'aws-cdk-lib';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import { DockerImageCode, DockerImageFunction, Function as LambdaFunction } from 'aws-cdk-lib/aws-lambda';
 import * as s3 from 'aws-cdk-lib/aws-s3';
+import * as wafv2 from 'aws-cdk-lib/aws-wafv2';
 import * as sfn from 'aws-cdk-lib/aws-stepfunctions';
 import * as tasks from 'aws-cdk-lib/aws-stepfunctions-tasks';
 import * as path from 'node:path';
@@ -67,15 +68,10 @@ const screenshots = new s3.Bucket(scannerStack, 'Screenshots', {
 screenshots.grantPut(scannerFunction);
 scannerFunction.addEnvironment('SCREENSHOT_BUCKET', screenshots.bucketName);
 
-// -----------------------------------------------------------------------------
-// Step Functions workflow (build step 6)
-//
-// crawl → scan every discovered page (Map, ~10 at a time) → summarize → email,
-// with scan-status writing live progress through AppSync at each stage. The
-// crawler and scan-status are defineFunction Lambdas; the scanner is the
-// container image above. A single Catch flips the Scan to "failed" so a thrown
-// step never leaves the browser's progress bar stuck mid-run.
-// -----------------------------------------------------------------------------
+// Step Functions workflow: crawl → scan every page (Map, ~10 at a time) →
+// summarize → finish, with scan-status writing progress through AppSync. A
+// single Catch flips the Scan to failed so a thrown step doesn't leave the
+// progress bar stuck.
 const workflowStack = backend.createStack('workflow');
 const crawlerFn = backend.crawler.resources.lambda;
 const statusFn = backend.scanStatus.resources.lambda;
@@ -226,7 +222,7 @@ for (const step of [beginScan, crawl, registerPages, scanAllPages, summarize, fi
 const stateMachine = new sfn.StateMachine(workflowStack, 'ScanWorkflow', {
   definitionBody: sfn.DefinitionBody.fromChainable(definition),
   timeout: Duration.minutes(30),
-  tracingEnabled: true, // X-Ray; CloudWatch/dashboards come in step 9
+  tracingEnabled: true, // X-Ray
 });
 
 // Let the state machine invoke the scanner container (the two defineFunction
@@ -268,3 +264,59 @@ const screenshotFn = backend.screenshotUrl.resources.lambda as LambdaFunction;
 screenshotFn.addEnvironment('SCREENSHOT_BUCKET', screenshots.bucketName);
 screenshots.grantRead(screenshotFn);
 
+// The public API is AppSync, which has no usage-plan throttle. A WAF web ACL
+// is the throttle: a tight per-IP limit on startScan (the expensive call) and
+// a wider one on everything else so a normal report can still load.
+const edgeStack = backend.createStack('edge');
+const rateLimitVisibility = (metricName: string): wafv2.CfnWebACL.VisibilityConfigProperty => ({
+  cloudWatchMetricsEnabled: true,
+  metricName,
+  sampledRequestsEnabled: true,
+});
+
+const publicApiAcl = new wafv2.CfnWebACL(edgeStack, 'PublicApiAcl', {
+  scope: 'REGIONAL',
+  defaultAction: { allow: {} },
+  visibilityConfig: rateLimitVisibility('reachablePublicApi'),
+  rules: [
+    {
+      name: 'StartScanPerIp',
+      priority: 0,
+      action: { block: {} },
+      statement: {
+        rateBasedStatement: {
+          // Counted over a 5-minute window. A person starting scans by hand
+          // will not get near 100; a script will.
+          limit: 100,
+          aggregateKeyType: 'IP',
+          scopeDownStatement: {
+            byteMatchStatement: {
+              searchString: 'startScan',
+              fieldToMatch: { body: { oversizeHandling: 'CONTINUE' } },
+              textTransformations: [{ priority: 0, type: 'NONE' }],
+              positionalConstraint: 'CONTAINS',
+            },
+          },
+        },
+      },
+      visibilityConfig: rateLimitVisibility('reachableStartScanPerIp'),
+    },
+    {
+      name: 'ApiPerIp',
+      priority: 1,
+      action: { block: {} },
+      statement: {
+        rateBasedStatement: {
+          limit: 2000,
+          aggregateKeyType: 'IP',
+        },
+      },
+      visibilityConfig: rateLimitVisibility('reachableApiPerIp'),
+    },
+  ],
+});
+
+new wafv2.CfnWebACLAssociation(edgeStack, 'PublicApiAclAssociation', {
+  resourceArn: backend.data.resources.graphqlApi.arn,
+  webAclArn: publicApiAcl.attrArn,
+});
