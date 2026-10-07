@@ -8,9 +8,9 @@ import { validateScanUrl } from "./validate";
 
 /**
  * start-scan: the only public write path. Validates the URL (SSRF boundary),
- * creates the Site + Scan rows, starts the Step Functions workflow seeded with
- * the new scanId, and returns { scanId, url } — the capability the browser then
- * uses to read and subscribe to its scan.
+ * creates the Scan row, starts the Step Functions workflow seeded with the new
+ * scanId, and returns { scanId, url } — the capability the browser then uses to
+ * read and subscribe to its scan.
  */
 
 const { resourceConfig, libraryOptions } = await getAmplifyDataClientConfig(env);
@@ -27,18 +27,12 @@ export const handler = async (event: StartScanArgs) => {
     throw new Error(result.reason);
   }
 
-  // One Site per domain is fine for a transient tool; we don't dedupe.
-  const { data: site, errors: siteErrors } = await data.models.Site.create({
-    domain: result.domain,
-  });
-  if (siteErrors || !site) throw new Error(`createSite: ${JSON.stringify(siteErrors)}`);
-
   // Create the Scan up front so the browser has an id to watch immediately; the
   // workflow advances this same record (it does not create its own). The ttl is
   // ~1 hour out (epoch seconds) — DynamoDB auto-deletes the row after that.
   const ttl = Math.floor(Date.now() / 1000) + 60 * 60;
   const { data: scan, errors: scanErrors } = await data.models.Scan.create({
-    siteId: site.id,
+    domain: result.domain,
     status: "pending",
     ttl,
   });

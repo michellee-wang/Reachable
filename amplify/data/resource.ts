@@ -4,7 +4,7 @@ import { screenshotUrl } from '../functions/screenshot-url/resource';
 import { startScan } from '../functions/start-scan/resource';
 
 /**
- * Reachable's data model: sites, scans, pages, violations.
+ * Reachable's data model: scans, pages, violations.
  *
  * This is a public, no-auth tool. There are no accounts. Access is via a public
  * API key baked into the app, not Cognito.
@@ -24,22 +24,13 @@ const schema = a.schema({
     url: a.string().required(),
   }),
 
-  // A domain being scanned, e.g. "example.org".
-  Site: a
-    .model({
-      domain: a.string().required(),
-      scans: a.hasMany('Scan', 'siteId'),
-    })
-    // Read-by-id only for the public key; no list, no public write.
-    .authorization((allow) => [allow.publicApiKey().to(['get', 'listen'])]),
-
-  // One crawl+scan run against a Site. This is the record the browser polls /
-  // subscribes to for live progress, so it carries the status and counts the
-  // Step Functions workflow advances through.
+  // One crawl+scan run. This is the record the browser polls / subscribes to
+  // for live progress, so it carries the status and counts the Step Functions
+  // workflow advances through.
   Scan: a
     .model({
-      siteId: a.id().required(),
-      site: a.belongsTo('Site', 'siteId'),
+      // The domain being scanned, e.g. "example.org" — shown in the report.
+      domain: a.string().required(),
       status: a.enum([
         'pending',
         'crawling',
@@ -116,9 +107,9 @@ const schema = a.schema({
   // The scan-status Lambda is the single writer of scan progress; it talks to
   // this API with its IAM execution role (see its handler).
   allow.resource(scanStatus),
-  // start-scan creates the Site + Scan rows (it's the startScan handler, but it
-  // also calls the data API with generateClient, so it needs the data env +
-  // grant like scan-status does).
+  // start-scan creates the Scan row (it's the startScan handler, but it also
+  // calls the data API with generateClient, so it needs the data env + grant
+  // like scan-status does).
   allow.resource(startScan),
 ]);
 

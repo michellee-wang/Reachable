@@ -91,7 +91,6 @@ export function flattenScanResult(scan: ScannerPageResult): PageResultInput {
  * implementation backed by the Amplify data client; tests supply a fake.
  */
 export interface GraphQLClient {
-  createScan(input: { siteId: string }): Promise<{ id: string }>;
   createPage(input: { scanId: string; url: string }): Promise<{ id: string }>;
   updateScan(input: {
     id: string;

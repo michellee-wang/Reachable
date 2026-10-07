@@ -198,9 +198,8 @@ const finish = new tasks.LambdaInvoke(workflowStack, 'Finish', {
 const markFailed = new tasks.LambdaInvoke(workflowStack, 'MarkFailed', {
   lambdaFunction: statusFn,
   payload: sfn.TaskInput.fromObject({
-    action: 'setStatus',
+    action: 'markFailed',
     scanId: sfn.JsonPath.stringAt('$.scanId'),
-    status: 'failed',
     error: sfn.JsonPath.stringAt('$.error.Cause'),
   }),
 }).next(new sfn.Fail(workflowStack, 'ScanFailed', { error: 'ScanFailed' }));

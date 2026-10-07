@@ -25,10 +25,6 @@ class FakeClient implements GraphQLClient {
   violations: Record<string, ViolationRow[]> = {};
   private seq = 0;
 
-  async createScan(input: { siteId: string }) {
-    this.calls.push({ op: "createScan", input });
-    return { id: `scan-${++this.seq}` };
-  }
   async createPage(input: { scanId: string; url: string }) {
     this.calls.push({ op: "createPage", input });
     return { id: `page-${++this.seq}` };

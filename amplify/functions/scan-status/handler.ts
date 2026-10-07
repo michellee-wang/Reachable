@@ -39,14 +39,6 @@ const data = generateClient<Schema>({ authMode: "iam" });
  * fails the state and Step Functions can retry it.
  */
 const client: GraphQLClient = {
-  async createScan(input) {
-    const { data: scan, errors } = await data.models.Scan.create({
-      siteId: input.siteId,
-      status: "pending",
-    });
-    if (errors || !scan) throw new Error(`createScan: ${JSON.stringify(errors)}`);
-    return { id: scan.id };
-  },
   async createPage(input) {
     const { data: page, errors } = await data.models.Page.create({
       scanId: input.scanId,
@@ -132,7 +124,7 @@ const explainer = createBedrockExplainer(bedrockClient(), env.BEDROCK_MODEL_ID);
  */
 export type StatusEvent =
   | { action: "beginScan"; scanId: string }
-  | { action: "setStatus"; scanId: string; status: string; error?: string }
+  | { action: "markFailed"; scanId: string; error?: string }
   | { action: "registerPages"; scanId: string; urls: string[] }
   | {
       action: "recordPageResult";
@@ -156,10 +148,12 @@ export const handler = async (event: StatusEvent) => {
       return { scanId: event.scanId };
     }
 
-    case "setStatus": {
+    case "markFailed": {
+      // The only non-happy-path status write: a step exhausted its retries, so
+      // flip the Scan to "failed" (with the error) and the browser stops waiting.
       await client.updateScan({
         id: event.scanId,
-        status: event.status,
+        status: "failed",
         ...(event.error ? { error: event.error } : {}),
       });
       return { scanId: event.scanId };
