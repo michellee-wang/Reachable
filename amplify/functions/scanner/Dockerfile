@@ -13,7 +13,7 @@ COPY package.json ./
 RUN npm install --omit=dev --no-package-lock
 
 # esbuild is a build-time tool; install it separately and bundle the handler.
-COPY handler.ts scan.ts ./
+COPY handler.ts scan.ts crops.ts ./
 RUN npm install --no-save esbuild@^0.28.2 \
   && npx esbuild handler.ts --bundle --platform=node --target=node20 \
      --external:playwright --external:@axe-core/playwright --outfile=handler.js \

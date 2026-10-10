@@ -1,97 +1,77 @@
 # Reachable
 
-Paste a URL, get an accessibility report. Reachable crawls up to ~200 public
-pages of a site, runs [axe-core](https://github.com/dequelabs/axe-core) against
-each one in a real headless Chromium, and ranks what it finds by impact — with
-the offending element, a screenshot, and a plain-English fix.
+Paste a URL, and automatically generate an accessibility report for the whole site! 
 
-It finds common issues. It is **not** a WCAG certification. It only scans public
-pages, respects `robots.txt`, and caps requests per site.
+## The Problem
 
-There are no accounts. Paste a URL, watch the progress bar, read the report.
-Scans expire after an hour.
+Most websites have accessibility problems but it’s difficult to seek each out: images without alt text, buttons without names, text that's too low-contrast etc. This makes it unaccessible for people who use screen readers, keyboards, or magnification.
+
+## The Idea
+
+Run a full-site accessibility scan in a real browser:
+
+- No install and no account
+- The whole site, crawls and searches for other pages
+- Outputs each issue with a screenshot, and fixes written
+
+## The Solution
+
+Reachable creates headless Chromium browsers, crawls up to about 200 public pages of a site, runs axe-core against each one. It collects issues and ranks them and the finished report can be saved as a PDF.
+
+Reachable does not certify WCAG compliance. 
 
 ## How it works
 
-```
-Browser ──startScan──▶ start-scan Lambda (validates URL, SSRF guard)
-                            │
-                            ▼
-                     Step Functions
-   beginScan ─▶ crawl ─▶ registerPages ─▶ Map(scan page ×10) ─▶ summarize ─▶ finish
-                                               │                    │
-                        axe in Chromium ───────┤                    └─ Bedrock: one
-                        screenshot ─▶ S3 ──────┘                       fix per rule
-                                               │
-                           scan-status Lambda ─┴─▶ AppSync ─▶ DynamoDB ─▶ live progress
+![Architecture diagram. The browser sends startScan through the AppSync API, which is rate limited by a WAF, to the start-scan Lambda. That Lambda validates the URL and starts a Step Functions workflow: crawl up to 200 pages, scan about 10 at a time with Chromium and axe, then write AI fixes. Screenshots go to S3 and scan results go to DynamoDB. Live progress comes back to the browser. Results are kept for one hour, then deleted.](docs/architecture.png)
 
-   Any step that throws is caught and routed to markFailed, so the scan ends
-   as `failed` instead of leaving the progress bar stuck.
-```
+### Architecture
 
-- **Crawler** (TypeScript Lambda) reads `robots.txt` and the sitemap, follows
-  same-domain links, dedupes, and stops around 200 pages.
-- **Scanner** (Chromium container Lambda) loads each page in a real browser so
-  JS-rendered content is scanned, runs axe, and captures a screenshot.
-- **scan-status** is the single writer of progress — every update goes through
-  AppSync so the browser's progress bar moves live.
-- **Bedrock** (Nova Micro, via a cross-region inference profile so it rides out
-  regional throttling) writes one plain-English fix per axe rule, cached so a
-  rule that repeats across pages is only explained once.
-- Scan data carries a 1-hour TTL and the public API key can only read a scan by
-  id, so a scan URL is a capability — you can't enumerate other people's scans.
+1. **Validate the URL:** `startScan` blocks localhost, private IPs, and the cloud metadata address
+2. **Crawl the site:** The crawler reads the sitemap and uses robots.txt but stops at 200 pages.
+3. **Scan each page:** About 10 pages run at a time in a container Lambda with Playwright and Chromium. Each page gets an axe scan. 
+4. Page are screenshotted: Stored in S3 for the report. For each failing element, the scanner saves a cropped screenshot of just that element
+5. **Explain fixes:** Bedrock writes some suggestions. The prompt will never include the page's HTML so so its safe against injections.
+6. **Stream progress/report:** AppSync pushes live progress to the web app. Each worker writes only its own page so parallel writes can't overwrite each other. 
 
-## Develop
+## Run it Yourself
 
 Everything runs from this directory.
 
-```sh
+```bash
 npm install
-npm run dev          # Vite dev server on localhost
+npm run dev          # Vite on localhost
 npm test             # unit tests
-npm run type-check   # app types
-npm run build        # production build
+npm run type-check   # vue-tsc for the app
+npx tsc --noEmit -p amplify/tsconfig.json   # the backend
+npm run build
 ```
-
-The app reads `amplify_outputs.json` at startup, so you need a backend deployed
-before a scan will run (see below).
 
 ## Backend
 
-The backend is Amplify Gen 2 + CDK (`amplify/`). It's deployed on demand and
-torn down when idle, not left running.
+The backend is Amplify Gen 2, defined in `amplify/backend.ts`. 
 
-```sh
-npx ampx sandbox --once   # one deploy, exits when done
+```bash
+npx ampx sandbox --once   # one synth + deploy, then exit
 npx ampx sandbox          # watch mode, redeploys on save
 npx ampx sandbox delete   # tear it down
 ```
 
-Deploying writes `amplify_outputs.json` (gitignored). Requirements:
-
-- **Docker** must be running — the scanner is a container-image Lambda, so the
-  first deploy builds a Chromium image and takes a few minutes.
-- AWS credentials for region **us-east-2**.
+Docker must be running. The first deploy builds the Chromium image and creates the screenshot bucket and the WAF, so it takes several minutes. The region is **us-east-2**.
 
 ## Layout
 
 ```
 amplify/
-  backend.ts            CDK: scanner container, S3, Step Functions, WAF, IAM
-  data/resource.ts      schema: Scan, Page, Violation, startScan
+  backend.ts                 scanner container, S3, Step Functions, WAF, IAM
+  data/resource.ts           Scan, Page, Violation, startScan, screenshotUrl
   functions/
-    crawler/            robots + sitemap + link crawl
-    scanner/            Chromium + axe (Docker)
-    scan-status/        single writer of progress; Bedrock fixes
-    start-scan/         URL validation + workflow kickoff
-    screenshot-url/     presigns a GET for one screenshot
+    crawler/                 robots.txt, sitemap, same-domain links
+    scanner/                 Chromium + axe (Docker image Lambda)
+    scan-status/             the only writer of progress; Bedrock fixes
+    start-scan/              URL validation and workflow kickoff
+    screenshot-url/          presigns a GET for one screenshot
 src/
-  App.vue               the form and live progress
-  ReportView.vue        the report
-  client.ts             the data client
+  App.vue                    the form and the live progress bar
+  ReportView.vue             the report
+  client.ts                  the data client
 ```
-
-## Local scanner
-
-`../scanner/` is a standalone Playwright + axe script for trying the scan
-locally against a file or URL, without deploying anything.

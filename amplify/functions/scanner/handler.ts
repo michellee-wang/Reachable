@@ -1,11 +1,12 @@
 import { PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
+import { randomUUID } from "node:crypto";
 import { scan, type ScanResult } from "./scan";
 
 const s3 = new S3Client({});
 
-// pageId/scanId are threaded through from the workflow so we can tie the result
-// back to its Page row and key the screenshot, without the scanner touching the
-// data model.
+// pageId/scanId are threaded through from the workflow so the result can be
+// tied back to its Page row. Crop keys are stamped onto nodes here; the
+// scanner still does not know about the data model.
 export interface ScanEvent {
   url: string;
   pageId: string;
@@ -22,16 +23,16 @@ export interface ScanResponse {
   violations: ScanResult["violations"];
   ruleCount: number;
   elementCount: number;
-  screenshotKey?: string;
   error?: string;
 }
 
-/** Upload the PNG. A failed upload must not fail the page: the axe result is
- *  the scan, and the screenshot is extra. */
-async function storeScreenshot(scanId: string, pageId: string, body: Buffer): Promise<string | undefined> {
+/** Upload one element crop. A failed upload must not fail the page: the axe
+ *  result is the scan, and the picture is extra. The key is `{scanId}/{uuid}.png`,
+ *  the same shape the public presign check allows. */
+async function storeScreenshot(scanId: string, body: Buffer): Promise<string | undefined> {
   const bucket = process.env.SCREENSHOT_BUCKET;
-  if (!bucket || !scanId || !pageId) return undefined;
-  const key = `${scanId}/${pageId}.png`;
+  if (!bucket || !scanId) return undefined;
+  const key = `${scanId}/${randomUUID()}.png`;
   try {
     await s3.send(
       new PutObjectCommand({
@@ -50,16 +51,19 @@ async function storeScreenshot(scanId: string, pageId: string, body: Buffer): Pr
 
 export const handler = async (event: ScanEvent): Promise<ScanResponse> => {
   try {
-    const { result, screenshot } = await scan(event.url);
+    const { result, crops } = await scan(event.url);
+    for (const crop of crops) {
+      const key = await storeScreenshot(event.scanId, crop.png);
+      const node = result.violations.find((v) => v.id === crop.ruleId)?.nodes[crop.nodeIndex];
+      if (key && node) node.screenshotKey = key;
+    }
     const elementCount = result.violations.reduce((n, v) => n + v.nodes.length, 0);
-    const screenshotKey = await storeScreenshot(event.scanId, event.pageId, screenshot);
     return {
       pageId: event.pageId,
       status: "done",
       ...result,
       ruleCount: result.violations.length,
       elementCount,
-      ...(screenshotKey ? { screenshotKey } : {}),
     };
   } catch (err) {
     return {

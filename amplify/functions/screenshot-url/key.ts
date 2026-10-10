@@ -1,6 +1,7 @@
 /**
- * Screenshot object keys are `{scanId}/{pageId}.png`, and both ids are Amplify
- * UUIDs. The public API will presign whatever key it is given, so this is the
+ * Screenshot object keys are `{scanId}/{id}.png`. Both segments are UUIDs:
+ * the scan id, then either the page id (older viewport shots) or the crop id.
+ * The public API will presign whatever key it is given, so this is the
  * boundary that keeps a caller from signing `../` or some other object.
  */
 const KEY_PATTERN =

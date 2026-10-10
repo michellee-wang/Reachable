@@ -280,7 +280,7 @@ describe("flattenScanResult", () => {
     expect(flat).toEqual({ pageId: "p9", status: "failed", violations: [] });
   });
 
-  it("keeps the screenshot key on the flattened result", () => {
+  it("keeps a legacy page screenshot key on the flattened result", () => {
     const flat = flattenScanResult({
       pageId: "p1",
       status: "done",
@@ -288,6 +288,25 @@ describe("flattenScanResult", () => {
       violations: [],
     });
     expect(flat.screenshotKey).toBe("scan/page.png");
+  });
+
+  it("copies an element crop key onto that violation only", () => {
+    const flat = flattenScanResult(
+      axe({
+        violations: [
+          {
+            id: "image-alt",
+            impact: "critical",
+            nodes: [
+              { target: "img.hero", html: "<img class=hero>", screenshotKey: "scan/crop.png" },
+              { target: "img.logo", html: "<img class=logo>" },
+            ],
+          },
+        ],
+      }),
+    );
+    expect(flat.violations[0].screenshotKey).toBe("scan/crop.png");
+    expect(flat.violations[1].screenshotKey).toBeUndefined();
   });
 });
 

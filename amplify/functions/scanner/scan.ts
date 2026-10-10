@@ -1,5 +1,6 @@
 import AxeBuilder from "@axe-core/playwright";
-import { chromium } from "playwright";
+import { chromium, type Page } from "playwright";
+import { nodesToCrop } from "./crops";
 
 /**
  * The accessibility scan: load a page in headless Chromium, run axe-core, and
@@ -16,6 +17,8 @@ export interface ScanNode {
   target: string;
   html: string;
   failureSummary?: string;
+  /** Set by the handler after the crop is stored. Never a buffer. */
+  screenshotKey?: string;
 }
 
 export interface ScanViolation {
@@ -39,14 +42,60 @@ function byImpact(a: ScanViolation, b: ScanViolation): number {
   return (ai === -1 ? IMPACT_ORDER.length : ai) - (bi === -1 ? IMPACT_ORDER.length : bi);
 }
 
+export interface ElementCrop {
+  ruleId: string;
+  nodeIndex: number;
+  png: Buffer;
+}
+
 export interface ScanOutput {
   result: ScanResult;
   /**
-   * Viewport PNG. A full-page capture of a long page is large enough to blow
-   * the Lambda's memory, and the image never rides the Step Functions payload
-   * (the handler uploads this buffer and returns only the object key).
+   * Crops of failing elements. Empty when the page has no violations.
+   * The handler uploads these and returns only the object keys.
    */
-  screenshot: Buffer;
+  crops: ElementCrop[];
+}
+
+/** Keep a crop small. A huge target (html, main) must not become a full-page capture. */
+const CROP_PAD = 12;
+const CROP_MAX_WIDTH = 1280;
+const CROP_MAX_HEIGHT = 480;
+
+/**
+ * Scroll the element into view and capture it, with a little surrounding
+ * context. Clip coordinates are viewport-relative. A miss is not a failed page.
+ */
+async function cropElement(page: Page, selector: string): Promise<Buffer | null> {
+  try {
+    const locator = page.locator(selector).first();
+    await locator.scrollIntoViewIfNeeded({ timeout: 2_000 });
+    const box = await locator.boundingBox();
+    if (!box || box.width < 1 || box.height < 1) return null;
+
+    const viewport = page.viewportSize() ?? { width: CROP_MAX_WIDTH, height: 800 };
+    const x = Math.max(0, Math.floor(box.x - CROP_PAD));
+    const y = Math.max(0, Math.floor(box.y - CROP_PAD));
+    const width = Math.min(
+      CROP_MAX_WIDTH,
+      Math.ceil(box.width + CROP_PAD * 2),
+      viewport.width - x,
+    );
+    const height = Math.min(
+      CROP_MAX_HEIGHT,
+      Math.ceil(box.height + CROP_PAD * 2),
+      viewport.height - y,
+    );
+    if (width < 1 || height < 1) return null;
+
+    return await page.screenshot({
+      type: "png",
+      animations: "disabled",
+      clip: { x, y, width, height },
+    });
+  } catch {
+    return null;
+  }
 }
 
 export async function scan(url: string): Promise<ScanOutput> {
@@ -85,7 +134,13 @@ export async function scan(url: string): Promise<ScanOutput> {
 
     violations.sort(byImpact);
 
-    const screenshot = await page.screenshot({ type: "png" });
+    // Clean pages are not photographed. Crops are taken from the raw axe
+    // targets, before they are flattened into the display string.
+    const crops: ElementCrop[] = [];
+    for (const pick of nodesToCrop(raw.violations)) {
+      const png = await cropElement(page, pick.selector);
+      if (png) crops.push({ ruleId: pick.ruleId, nodeIndex: pick.nodeIndex, png });
+    }
 
     return {
       result: {
@@ -93,7 +148,7 @@ export async function scan(url: string): Promise<ScanOutput> {
         scannedAt: new Date().toISOString(),
         violations,
       },
-      screenshot,
+      crops,
     };
   } finally {
     await browser.close();

@@ -54,7 +54,8 @@ const schema = a.schema({
     })
     .authorization((allow) => [allow.publicApiKey().to(['get', 'listen'])]),
 
-  // One URL within a Scan, with its scan status and the S3 key of its screenshot.
+  // One URL within a Scan. screenshotKey is only set by older scans that
+  // stored a viewport PNG; new scans crop the failing element onto Violation.
   Page: a
     .model({
       scanId: a.id().required(),
@@ -80,6 +81,8 @@ const schema = a.schema({
       // offending element: CSS selector + the HTML snippet
       target: a.string(),
       html: a.string(),
+      // element crop, `{scanId}/{uuid}.png`, when this node was one of the few photographed
+      screenshotKey: a.string(),
       plainEnglishFix: a.string(),
     })
     .authorization((allow) => [allow.publicApiKey().to(['get', 'listen'])]),
@@ -95,8 +98,9 @@ const schema = a.schema({
     .handler(a.handler.function(startScan))
     .authorization((allow) => [allow.publicApiKey()]),
 
-  // Presign one screenshot. The key is `{scanId}/{pageId}.png`; the Lambda
-  // rejects anything else, and the bucket itself stays private.
+  // Presign one screenshot. The key is `{scanId}/{uuid}.png` (the page id on
+  // older scans, the crop id now). The Lambda rejects anything else, and the
+  // bucket itself stays private.
   screenshotUrl: a
     .query()
     .arguments({ key: a.string().required() })

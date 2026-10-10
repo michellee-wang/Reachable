@@ -18,6 +18,8 @@ export interface ViolationInput {
   helpUrl?: string;
   target?: string;
   html?: string;
+  /** S3 key of this element's crop, when one was stored. */
+  screenshotKey?: string;
 }
 
 /** The result of scanning one page, handed from the scanner to this Lambda. */
@@ -44,7 +46,7 @@ export interface ScannerPageResult {
     description?: string;
     help?: string;
     helpUrl?: string;
-    nodes: { target?: string; html?: string }[];
+    nodes: { target?: string; html?: string; screenshotKey?: string }[];
   }[];
 }
 
@@ -74,7 +76,12 @@ export function flattenScanResult(scan: ScannerPageResult): PageResultInput {
       violations.push(base);
     } else {
       for (const node of rule.nodes) {
-        violations.push({ ...base, target: node.target, html: node.html });
+        violations.push({
+          ...base,
+          target: node.target,
+          html: node.html,
+          ...(node.screenshotKey ? { screenshotKey: node.screenshotKey } : {}),
+        });
       }
     }
   }
