@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onUnmounted, ref } from 'vue'
-import { client, IMPACTS, type Impact, type Scan } from './client'
+import { client, IMPACTS, loadScanPages, type Impact, type Scan } from './client'
 import ReportView from './ReportView.vue'
 
 /**
@@ -68,10 +68,11 @@ async function start() {
 
 /** Catch pages that finished before the subscription was listening. */
 async function syncDone(scanId: string) {
-  const { data } = await client.models.Scan.get({ id: scanId })
-  if (!data) return
-  const { data: pageRows } = await data.pages()
-  for (const page of pageRows ?? []) noteDone(page)
+  try {
+    for (const { page } of await loadScanPages(scanId)) noteDone(page)
+  } catch {
+    /* live updates still arrive through the subscription */
+  }
 }
 
 /** Subscribe to the one scan we just started and mirror its live state. */

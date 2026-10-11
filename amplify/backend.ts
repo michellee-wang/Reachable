@@ -170,12 +170,18 @@ const recordPageResult = new tasks.LambdaInvoke(workflowStack, 'RecordPageResult
 // The per-page chain inside the Map.
 scanPage.next(recordPageResult);
 
-// Map over the discovered pages, ~10 at a time (a plain Map, not a Distributed
-// Map — the ~200-page cap is small enough; see CLAUDE.md). Each iteration gets
-// one page plus the scanId threaded in so recordPageResult knows the Scan.
+// Map over the discovered pages, a few at a time (a plain Map, not a
+// Distributed Map — the ~200-page cap is small enough; see CLAUDE.md). Each
+// iteration gets one page plus the scanId threaded in so recordPageResult
+// knows the Scan.
+//
+// Width is bounded by the account's Lambda concurrency limit, which is 10 on
+// this account (the new-account default). At 10 the Map alone fills it and
+// every other invoke — screenshotUrl for a report, startScan for the next
+// visitor — gets a 429. Raise this after a quota increase.
 const scanAllPages = new sfn.Map(workflowStack, 'ScanAllPages', {
   itemsPath: '$.register.pages',
-  maxConcurrency: 10,
+  maxConcurrency: 5,
   itemSelector: {
     'pageId.$': '$$.Map.Item.Value.pageId',
     'url.$': '$$.Map.Item.Value.url',
@@ -283,12 +289,28 @@ screenshots.grantRead(screenshotFn);
 // The public API is AppSync, which has no usage-plan throttle. A WAF web ACL
 // is the throttle: a tight per-IP limit on startScan (the expensive call) and
 // a wider one on everything else so a normal report can still load.
+//
+// Both rules count only requests that present the public API key. scan-status
+// and start-scan call the same endpoint with SigV4 from Lambda egress IPs, and
+// a big scan (one mutation per violation, then one per fix) blew through the
+// per-IP limit, so the WAF blocked the pipeline's own writes and every scan
+// failed with an opaque "Unknown error" for several minutes. A request without
+// the key cannot do anything here unless it is validly signed, so leaving it
+// out of the count gives nothing away.
 const edgeStack = backend.createStack('edge');
 const rateLimitVisibility = (metricName: string): wafv2.CfnWebACL.VisibilityConfigProperty => ({
   cloudWatchMetricsEnabled: true,
   metricName,
   sampledRequestsEnabled: true,
 });
+const hasPublicApiKey: wafv2.CfnWebACL.StatementProperty = {
+  sizeConstraintStatement: {
+    fieldToMatch: { singleHeader: { name: 'x-api-key' } },
+    comparisonOperator: 'GT',
+    size: 0,
+    textTransformations: [{ priority: 0, type: 'NONE' }],
+  },
+};
 
 const publicApiAcl = new wafv2.CfnWebACL(edgeStack, 'PublicApiAcl', {
   scope: 'REGIONAL',
@@ -306,11 +328,18 @@ const publicApiAcl = new wafv2.CfnWebACL(edgeStack, 'PublicApiAcl', {
           limit: 100,
           aggregateKeyType: 'IP',
           scopeDownStatement: {
-            byteMatchStatement: {
-              searchString: 'startScan',
-              fieldToMatch: { body: { oversizeHandling: 'CONTINUE' } },
-              textTransformations: [{ priority: 0, type: 'NONE' }],
-              positionalConstraint: 'CONTAINS',
+            andStatement: {
+              statements: [
+                hasPublicApiKey,
+                {
+                  byteMatchStatement: {
+                    searchString: 'startScan',
+                    fieldToMatch: { body: { oversizeHandling: 'CONTINUE' } },
+                    textTransformations: [{ priority: 0, type: 'NONE' }],
+                    positionalConstraint: 'CONTAINS',
+                  },
+                },
+              ],
             },
           },
         },
@@ -325,6 +354,7 @@ const publicApiAcl = new wafv2.CfnWebACL(edgeStack, 'PublicApiAcl', {
         rateBasedStatement: {
           limit: 2000,
           aggregateKeyType: 'IP',
+          scopeDownStatement: hasPublicApiKey,
         },
       },
       visibilityConfig: rateLimitVisibility('reachableApiPerIp'),

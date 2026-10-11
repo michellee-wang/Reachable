@@ -1,19 +1,14 @@
 <script setup lang="ts">
 import { onMounted, ref } from 'vue'
-import { client, IMPACTS, type Impact, type Page, type Violation } from './client'
+import { client, IMPACTS, loadScanPages, type Impact, type PageWithViolations } from './client'
 
 /**
- * The report for one scan. Pages and violations are loaded by traversing
- * relationships (get/listen is enough — you must already hold the scanId).
+ * The report for one scan. Pages and violations come from one nested read
+ * under getScan (get/listen is enough — you must already hold the scanId).
  * Issues are grouped by axe rule so the same failure is explained once;
  * the elements and screenshots stay inside the disclosure.
  */
 const props = defineProps<{ scanId: string }>()
-
-interface PageReport {
-  page: Page
-  violations: Violation[]
-}
 
 interface ElementHit {
   key: string
@@ -46,6 +41,7 @@ const loading = ref(true)
 const rules = ref<RuleGroup[]>([])
 const failedPages = ref<string[]>([])
 const cleanCount = ref(0)
+const loadError = ref('')
 const shots = ref<Record<string, string>>({})
 
 function impactRank(impact: string | null | undefined): number {
@@ -63,7 +59,7 @@ const SHOTS_PER_RULE = 3
 /** One group per axe rule, worst impact first. A fix is rule-level, so it is
  *  shown once. Element crops are capped per rule, and the same selector is
  *  shown once so a layout failure reads as one picture plus every page it hits. */
-function groupByRule(reports: PageReport[]): {
+function groupByRule(reports: PageWithViolations[]): {
   rules: RuleGroup[]
   failed: string[]
   clean: number
@@ -155,15 +151,7 @@ function groupByRule(reports: PageReport[]): {
 
 onMounted(async () => {
   try {
-    const { data: scan } = await client.models.Scan.get({ id: props.scanId })
-    if (!scan) return
-    const { data: pageRows } = await scan.pages()
-    const reports = await Promise.all(
-      (pageRows ?? []).map(async (page) => {
-        const { data: violations } = await page.violations()
-        return { page, violations: violations ?? [] }
-      }),
-    )
+    const reports = await loadScanPages(props.scanId)
     const grouped = groupByRule(reports)
     const resolved: Record<string, string> = {}
     const keys = new Set<string>()
@@ -175,16 +163,24 @@ onMounted(async () => {
         }
       }
     }
+    // A picture that cannot be signed (the Lambda is throttled while a big
+    // scan runs, say) is dropped; the issue is still listed without it.
     await Promise.all(
       [...keys].map(async (key) => {
-        const { data } = await client.queries.screenshotUrl({ key })
-        if (data) resolved[key] = data
+        try {
+          const { data } = await client.queries.screenshotUrl({ key })
+          if (data) resolved[key] = data
+        } catch {
+          /* no picture for this element */
+        }
       }),
     )
     shots.value = resolved
     rules.value = grouped.rules
     failedPages.value = grouped.failed
     cleanCount.value = grouped.clean
+  } catch (e) {
+    loadError.value = e instanceof Error ? e.message : 'Could not load the report.'
   } finally {
     loading.value = false
   }
@@ -195,7 +191,8 @@ onMounted(async () => {
   <p v-if="loading" class="loading">Loading the report…</p>
 
   <div v-else class="body">
-    <p v-if="rules.length === 0 && cleanCount > 0" class="none">
+    <p v-if="loadError" class="none" role="alert">Could not load the report. {{ loadError }}</p>
+    <p v-else-if="rules.length === 0 && cleanCount > 0" class="none">
       No issues found on {{ cleanCount }} {{ cleanCount === 1 ? 'page' : 'pages' }}.
     </p>
     <p v-else-if="rules.length === 0 && failedPages.length === 0" class="none">
