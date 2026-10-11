@@ -2,7 +2,7 @@
 
 Paste a URL, and automatically generate an accessibility report for the whole site! 
 
-![Video of demonstration](https://imgur.com/a/ZZ1CFRW)
+![Demo: paste a URL, watch the scan progress, and read the ranked report](https://i.imgur.com/KTFria0.gif)
 
 ## The Problem
 
