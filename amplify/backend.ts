@@ -1,7 +1,13 @@
 import { defineBackend } from '@aws-amplify/backend';
 import { Duration, RemovalPolicy, Stack } from 'aws-cdk-lib';
 import * as iam from 'aws-cdk-lib/aws-iam';
-import { DockerImageCode, DockerImageFunction, Function as LambdaFunction } from 'aws-cdk-lib/aws-lambda';
+import { Platform } from 'aws-cdk-lib/aws-ecr-assets';
+import {
+  Architecture,
+  DockerImageCode,
+  DockerImageFunction,
+  Function as LambdaFunction,
+} from 'aws-cdk-lib/aws-lambda';
 import * as s3 from 'aws-cdk-lib/aws-s3';
 import * as wafv2 from 'aws-cdk-lib/aws-wafv2';
 import * as sfn from 'aws-cdk-lib/aws-stepfunctions';
@@ -40,8 +46,16 @@ const backend = defineBackend({
 const here = path.dirname(fileURLToPath(import.meta.url));
 const scannerStack = backend.createStack('scanner');
 
+// Pin the image platform and the function architecture to the same thing.
+// Without the pin, Docker builds for the host (arm64 on an Apple Silicon Mac)
+// while Lambda defaults to x86_64, and every invoke dies with
+// Runtime.InvalidEntrypoint / ProcessSpawnFailed. ARM is the cheaper of the two
+// and Chromium runs on it, so pin to ARM rather than emulate amd64 locally.
 const scannerFunction = new DockerImageFunction(scannerStack, 'ScannerFunction', {
-  code: DockerImageCode.fromImageAsset(path.join(here, 'functions', 'scanner')),
+  code: DockerImageCode.fromImageAsset(path.join(here, 'functions', 'scanner'), {
+    platform: Platform.LINUX_ARM64,
+  }),
+  architecture: Architecture.ARM_64,
   memorySize: 2048, // Chromium needs headroom
   timeout: Duration.seconds(90),
 });
