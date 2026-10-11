@@ -6,6 +6,11 @@ import { defineFunction } from "@aws-amplify/backend";
  */
 export const screenshotUrl = defineFunction({
   name: "screenshot-url",
+  // Same stack as the data API: the API resolves startScan/screenshotUrl to
+  // these functions and grants them data access back, and the workflow (also
+  // in the data stack) invokes them while start-scan holds its ARN. Separate
+  // stacks would reference each other in a loop CloudFormation rejects.
+  resourceGroupName: "data",
   entry: "./handler.ts",
   timeoutSeconds: 10,
   memoryMB: 256,

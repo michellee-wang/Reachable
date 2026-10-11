@@ -24,6 +24,11 @@ export const BEDROCK_FOUNDATION_MODEL_ID = "amazon.nova-micro-v1:0";
 
 export const scanStatus = defineFunction({
   name: "scan-status",
+  // Same stack as the data API: the API resolves startScan/screenshotUrl to
+  // these functions and grants them data access back, and the workflow (also
+  // in the data stack) invokes them while start-scan holds its ARN. Separate
+  // stacks would reference each other in a loop CloudFormation rejects.
+  resourceGroupName: "data",
   entry: "./handler.ts",
   // Summarize calls the model once per distinct axe rule. 60s was enough to
   // flip a status; it is not enough to explain a few dozen rules.

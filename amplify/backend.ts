@@ -72,7 +72,10 @@ scannerFunction.addEnvironment('SCREENSHOT_BUCKET', screenshots.bucketName);
 // summarize → finish, with scan-status writing progress through AppSync. A
 // single Catch flips the Scan to failed so a thrown step doesn't leave the
 // progress bar stuck.
-const workflowStack = backend.createStack('workflow');
+// Lives in the data stack with the four defineFunction Lambdas (resourceGroupName:
+// "data" in their resource.ts): the workflow invokes them and start-scan needs
+// the state machine ARN, so a separate stack would be a cyclic reference.
+const workflowStack = backend.data.stack;
 const crawlerFn = backend.crawler.resources.lambda;
 const statusFn = backend.scanStatus.resources.lambda;
 
