@@ -2,6 +2,8 @@
 
 Paste a URL, and automatically generate an accessibility report for the whole site! 
 
+![](https://imgur.com/a/zaBbwsg)
+
 ## The Problem
 
 Most websites have accessibility problems but it’s difficult to seek each out: images without alt text, buttons without names, text that's too low-contrast etc. This makes it unaccessible for people who use screen readers, keyboards, or magnification.
