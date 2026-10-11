@@ -2,7 +2,7 @@
 
 Paste a URL, and automatically generate an accessibility report for the whole site! 
 
-![](https://imgur.com/a/zaBbwsg)
+![Video of demonstration](https://imgur.com/a/zaBbwsg)
 
 ## The Problem
 
